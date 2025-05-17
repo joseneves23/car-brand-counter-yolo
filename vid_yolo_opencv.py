@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from sort import Sort
 
 import time
 import sys
@@ -25,6 +26,8 @@ weights_path = "weights/yolo-obj_final.weights"
 # loading all the class labels (objects)
 LABELS = open("data/obj.names").read().strip().split("\n")
 
+brand_counts = {label: 0 for label in LABELS}
+
 # generating colors for each object for later plotting
 COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 
@@ -34,15 +37,15 @@ COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 print("[INFO] loading YOLO from disk...")
 net = cv2.dnn.readNetFromDarknet(config_path, weights_path)
 ln = net.getLayerNames()
-ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
 
 
 # the default saving video file extension for this code is avi (for Windows)
 # this code is tested with mp4 extension videos
 
 # change path name to experiment with videos
-path_name = "data/mercedes.mp4"
-output_path = "output_video/mercedes.avi"
+path_name = "data/bentley_chrysler.mp4"
+output_path = "output_video/bentley_chrysler.avi"
 
 
 # initialize the video stream, pointer to output video file, and
@@ -52,100 +55,96 @@ writer = None
 (W, H) = (None, None)
 
 
-# loop over frames from the video file stream
+tracker = Sort(max_age=30, min_hits=3, iou_threshold=0.3)
+unique_cars = {} 
+
 while True:
-	# read the next frame from the file
-	(grabbed, frame) = vs.read()
+    (grabbed, frame) = vs.read()
+    if not grabbed:
+        break
 
-	# if the frame was not grabbed, then we have reached the end
-	# of the stream
-	if not grabbed:
-		break
+    if W is None or H is None:
+        (H, W) = frame.shape[:2]
 
-	# if the frame dimensions are empty, grab them
-	if W is None or H is None:
-		(H, W) = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+    net.setInput(blob)
+    layerOutputs = net.forward(ln)
 
-	# construct a blob from the input frame and then perform a forward
-	# pass of the YOLO object detector, in return will be giving the bounding boxes
-	# and associated probabilities
-	blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (416, 416),
-		swapRB=True, crop=False)
-	net.setInput(blob)
-	start = time.time()
-	layerOutputs = net.forward(ln)
-	end = time.time()
+    boxes = []
+    confidences = []
+    classIDs = []
 
-	# initialize the lists of detected bounding boxes, confidences,
-	# and class IDs, respectively
-	boxes = []
-	confidences = []
-	classIDs = []
+    for output in layerOutputs:
+        for detection in output:
+            scores = detection[5:]
+            classID = np.argmax(scores)
+            confidence = scores[classID]
+            if confidence > CONFIDENCE:
+                box = detection[0:4] * np.array([W, H, W, H])
+                (centerX, centerY, width, height) = box.astype("int")
+                x = int(centerX - (width / 2))
+                y = int(centerY - (height / 2))
+                boxes.append([x, y, int(width), int(height)])
+                confidences.append(float(confidence))
+                classIDs.append(classID)
 
-	# loop over each of the layer outputs
-	for output in layerOutputs:
-		# loop over each of the detections
-		for detection in output:
-			# extract the class ID and confidence (i.e., probability)
-			# of the current object detection
-			scores = detection[5:]
-			classID = np.argmax(scores)
-			confidence = scores[classID]
+        idxs = cv2.dnn.NMSBoxes(boxes, confidences, SCORE_THRESHOLD, IOU_THRESHOLD)
 
-			# filter out weak predictions by ensuring the detected
-			# probability is greater than the minimum probability
-			if confidence > CONFIDENCE:
-				# scale the bounding box coordinates back relative to
-				# the size of the image, keeping in mind that YOLO
-				# actually returns the center (x, y)-coordinates of
-				# the bounding box followed by the boxes' width and
-				# height
-				box = detection[0:4] * np.array([W, H, W, H])
-				(centerX, centerY, width, height) = box.astype("int")
+    dets = []
+    det_brands = []
+    det_confs = []
+    if len(idxs) > 0:
+        for i in idxs.flatten():
+            x, y, w, h = boxes[i]
+            dets.append([x, y, x + w, y + h, confidences[i]])
+            det_brands.append(classIDs[i])
+            det_confs.append(confidences[i])
 
-				# use the center (x, y)-coordinates to derive the top
-				# and and left corner of the bounding box
-				x = int(centerX - (width / 2))
-				y = int(centerY - (height / 2))
+    # Garante que dets é sempre um array numpy
+    if len(dets) > 0:
+        dets_np = np.array(dets)
+    else:
+        dets_np = np.empty((0, 5))
 
-				# update our list of bounding box coordinates,
-				# confidences, and class IDs
-				boxes.append([x, y, int(width), int(height)])
-				confidences.append(float(confidence))
-				classIDs.append(classID)
+    tracks = tracker.update(dets_np)
+    # Para cada track, associa a detection mais próxima (pelo centro)
+    for track in tracks:
+        track_id = int(track[4])
+        x1, y1, x2, y2 = map(int, track[:4])
+        # Encontra a detection mais próxima deste track
+        min_dist = float('inf')
+        best_idx = -1
+        for idx, det in enumerate(dets):
+            dx1, dy1, dx2, dy2, _ = det
+            center_det = ((dx1 + dx2) / 2, (dy1 + dy2) / 2)
+            center_track = ((x1 + x2) / 2, (y1 + y2) / 2)
+            dist = np.linalg.norm(np.array(center_det) - np.array(center_track))
+            if dist < min_dist:
+                min_dist = dist
+                best_idx = idx
+        # Só associa se ainda não existir
+        if track_id not in unique_cars and best_idx != -1:
+            unique_cars[track_id] = (LABELS[det_brands[best_idx]], det_confs[best_idx])
+        brand, conf = unique_cars.get(track_id, ("Desconhecido", 0))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+        cv2.putText(frame, f"{brand} {conf:.2f} ID:{track_id}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-	# apply non-maxima suppression to suppress weak, overlapping
-	# bounding boxes
-	idxs = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE,
-		SCORE_THRESHOLD)
-
-	# ensure at least one detection exists
-	if len(idxs) > 0:
-		# loop over the indexes we are keeping
-		for i in idxs.flatten():
-			# extract the bounding box coordinates
-			(x, y) = (boxes[i][0], boxes[i][1])
-			(w, h) = (boxes[i][2], boxes[i][3])
-
-			# draw a bounding box rectangle and label on the frame
-			color = [int(c) for c in COLORS[classIDs[i]]]
-			cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-			text = "{}: {:.4f}".format(LABELS[classIDs[i]],
-				confidences[i])
-			cv2.putText(frame, text, (x, y - 5),
-				cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-	# check if the video writer is None
-	if writer is None:
-		# initialize our video writer
-		fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-		writer = cv2.VideoWriter(output_path, fourcc, 30,
-			(frame.shape[1], frame.shape[0]), True)
-
-	# write the output frame to disk
-	writer.write(frame)
+    # Escreve o frame no vídeo de saída
+    if writer is None:
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        writer = cv2.VideoWriter(output_path, fourcc, 30, (frame.shape[1], frame.shape[0]), True)
+    writer.write(frame)
 
 # release the file pointers
 print("[INFO] cleaning up...")
 writer.release()
 vs.release()
+
+# Relatório final
+from collections import Counter
+# Conta só a marca, ignorando a confiança
+brand_counts = Counter([brand for brand, conf in unique_cars.values()])
+print("\nRelatório de contagem de carros por marca:")
+for brand, count in brand_counts.items():
+    print(f"{brand}: {count}")

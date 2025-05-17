@@ -26,6 +26,8 @@ weights_path = "weights/yolo-obj_final.weights"
 # loading all the class labels (objects)
 LABELS = open("data/obj.names").read().strip().split("\n")
 
+brand_counts = {label: 0 for label in LABELS}
+
 # generating colors for each object for later plotting
 COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 
@@ -34,7 +36,7 @@ net = cv2.dnn.readNetFromDarknet(config_path, weights_path)
 
 
 # path name to the image
-path_name = "data/chrysler.jpg"
+path_name = "data/ford.jpg"
 
 # arrange filenames to later save the deteceted object image
 # jfif extension may cause problems, try jpg format
@@ -58,7 +60,7 @@ net.setInput(blob)
 ln = net.getLayerNames()
 
 # determine only the *output* layer names that we need from YOLO to detect
-ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
 
 
 
@@ -133,6 +135,7 @@ thickness = 1
 if len(idxs) > 0:
     # loop over the indexes we are keeping
     for i in idxs.flatten():
+
         # extract the bounding box coordinates
         x, y = boxes[i][0], boxes[i][1]
         w, h = boxes[i][2], boxes[i][3]
@@ -154,11 +157,25 @@ if len(idxs) > 0:
         # now put the text (label: confidence %)
         cv2.putText(image, text, (x, y - 5), cv2.FONT_HERSHEY_DUPLEX,
             fontScale=font_scale, color=font_color, thickness=font_thickness)
+
+        brand_counts[LABELS[class_ids[i]]] += 1
         
 # display image  
 cv2.imshow("image", image)
 if cv2.waitKey(0) == ord("q"):
     pass
 
-# save to a file 
-cv2.imwrite(filename + "_yolov4." + ext, image)
+output_dir = "output_images"
+os.makedirs(output_dir, exist_ok=True)
+
+# Guarda a imagem na pasta output_images
+output_path = os.path.join(output_dir, filename + "_yolov4." + ext)
+cv2.imwrite(output_path, image)
+
+print(f"Imagem guardada em: {output_path}")
+
+
+print("\nRelatório de contagem de carros por marca:")
+for brand, count in brand_counts.items():
+    if count > 0:
+        print(f"{brand}: {count}")
